@@ -323,7 +323,7 @@ export default function Home() {
     <main className="app-shell">
       <audio
         ref={audioRef}
-        src={audioUrl}
+        src={audioUrl || undefined}
         onPlay={() => setIsPlaying(true)}
         onPause={() => setIsPlaying(false)}
         onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
