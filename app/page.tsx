@@ -5,6 +5,7 @@ import type { FFmpeg as FFmpegType } from "@ffmpeg/ffmpeg";
 
 type LyricLine = { time: number; text: string };
 type DeviceOption = { deviceId: string; label: string };
+type KtvSource = { file: File; accompanimentAudioIndex: number; audioChannels: number[] };
 type AudioContextWithSink = AudioContext & { setSinkId?: (sinkId: string) => Promise<void> };
 type MediaElementWithSink = HTMLMediaElement & { setSinkId?: (sinkId: string) => Promise<void> };
 type MediaDevicesWithOutputPicker = MediaDevices & {
@@ -82,13 +83,18 @@ export default function Home() {
   const objectUrlRef = useRef<string | null>(null);
   const originalObjectUrlRef = useRef<string | null>(null);
   const videoObjectUrlRef = useRef<string | null>(null);
+  const vocalReducedObjectUrlRef = useRef<string | null>(null);
   const ffmpegRef = useRef<FFmpegType | null>(null);
+  const ktvSourceRef = useRef<KtvSource | null>(null);
   const conversionPhaseRef = useRef({ start: 0, span: 1 });
 
   const [songName, setSongName] = useState("还没有选择歌曲");
   const [audioUrl, setAudioUrl] = useState("");
   const [originalAudioUrl, setOriginalAudioUrl] = useState("");
   const [videoUrl, setVideoUrl] = useState("");
+  const [vocalReducedAudioUrl, setVocalReducedAudioUrl] = useState("");
+  const [vocalReductionOn, setVocalReductionOn] = useState(false);
+  const [conversionMode, setConversionMode] = useState<"video" | "vocal">("video");
   const [trackMode, setTrackMode] = useState<"original" | "accompaniment">("accompaniment");
   const [lyrics, setLyrics] = useState<LyricLine[]>(starterLyrics);
   const [lyricsDraft, setLyricsDraft] = useState("");
@@ -120,6 +126,7 @@ export default function Home() {
   const [ktvTrackNote, setKtvTrackNote] = useState("");
 
   const hasSong = Boolean(audioUrl || originalAudioUrl);
+  const playbackAudioUrl = vocalReductionOn && vocalReducedAudioUrl ? vocalReducedAudioUrl : audioUrl;
   const effectiveTrackMode = trackMode === "original" && originalAudioUrl
     ? "original"
     : audioUrl
@@ -272,6 +279,7 @@ export default function Home() {
     if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
     if (originalObjectUrlRef.current) URL.revokeObjectURL(originalObjectUrlRef.current);
     if (videoObjectUrlRef.current) URL.revokeObjectURL(videoObjectUrlRef.current);
+    if (vocalReducedObjectUrlRef.current) URL.revokeObjectURL(vocalReducedObjectUrlRef.current);
     ffmpegRef.current?.terminate();
     void graphRef.current?.context.close();
   }, []);
@@ -366,9 +374,18 @@ export default function Home() {
     }
   }, [recordingUrl, selectedOutputId]);
 
+  const clearVocalReduction = () => {
+    if (vocalReducedObjectUrlRef.current) URL.revokeObjectURL(vocalReducedObjectUrlRef.current);
+    vocalReducedObjectUrlRef.current = null;
+    setVocalReducedAudioUrl("");
+    setVocalReductionOn(false);
+  };
+
   const handleAudioFile = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
+    clearVocalReduction();
+    ktvSourceRef.current = null;
     if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
     const url = URL.createObjectURL(file);
     objectUrlRef.current = url;
@@ -386,6 +403,8 @@ export default function Home() {
   const handleOriginalFile = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
+    clearVocalReduction();
+    ktvSourceRef.current = null;
     if (originalObjectUrlRef.current) URL.revokeObjectURL(originalObjectUrlRef.current);
     const url = URL.createObjectURL(file);
     originalObjectUrlRef.current = url;
@@ -457,6 +476,9 @@ export default function Home() {
       return;
     }
 
+    clearVocalReduction();
+    ktvSourceRef.current = null;
+    setConversionMode("video");
     setIsConverting(true);
     setConversionError("");
     setConversionProgress(1);
@@ -511,6 +533,7 @@ export default function Home() {
       let firstTitle = (audioStreams[0]?.tags?.title || "").toLowerCase();
       let secondTitle = (audioStreams[1]?.tags?.title || "").toLowerCase();
       const isAccompanimentTitle = (title: string) => /(伴奏|karaoke|instrumental|accomp|music)/i.test(title);
+      const accompanimentAudioIndex = audioStreams.length >= 2 && isAccompanimentTitle(firstTitle) && !isAccompanimentTitle(secondTitle) ? 0 : Math.min(1, audioStreams.length - 1);
 
       if (audioStreams.length >= 2) {
         conversionPhaseRef.current = { start: 74, span: 9 };
@@ -555,6 +578,12 @@ export default function Home() {
         setKtvTrackNote("只找到一路单声道音频，已作为伴奏载入。");
       }
 
+      ktvSourceRef.current = {
+        file,
+        accompanimentAudioIndex,
+        audioChannels: audioStreams.map((stream) => stream.channels || 0),
+      };
+
       setSongName(file.name.replace(/\.[^.]+$/, ""));
       setCurrentTime(0);
       setDuration(0);
@@ -586,11 +615,92 @@ export default function Home() {
     setConversionProgress(0);
   };
 
+  const toggleVocalReduction = async () => {
+    audioRef.current?.pause();
+    originalAudioRef.current?.pause();
+    videoRef.current?.pause();
+    setIsPlaying(false);
+
+    if (vocalReducedAudioUrl) {
+      setVocalReductionOn((enabled) => !enabled);
+      setTrackMode("accompaniment");
+      setToast(vocalReductionOn ? "已恢复普通伴奏" : "已启用人声削弱伴奏");
+      return;
+    }
+
+    const source = ktvSourceRef.current;
+    if (!source) {
+      setMicError("请先导入一个 MKV 或 MPG 的 KTV 视频。");
+      return;
+    }
+    if ((source.audioChannels[source.accompanimentAudioIndex] || 0) < 2) {
+      setMicError("当前伴奏音轨是单声道，无法用左右声道抵消人声。请先试试“对调音轨”。");
+      return;
+    }
+
+    setConversionMode("vocal");
+    setIsConverting(true);
+    setConversionError("");
+    setConversionProgress(2);
+    setConversionStatus("正在分析左右声道中的人声位置…");
+    let mounted = false;
+    try {
+      const ffmpeg = await loadConverter();
+      const { FFFSType } = await import("@ffmpeg/ffmpeg");
+      const mountPoint = "/vocal-input";
+      try { await ffmpeg.createDir(mountPoint); } catch { /* already exists */ }
+      await ffmpeg.mount(FFFSType.WORKERFS, { files: [source.file] }, mountPoint);
+      mounted = true;
+      const inputPath = `${mountPoint}/${source.file.name}`;
+
+      setConversionStatus("正在削弱位于中央的人声…");
+      conversionPhaseRef.current = { start: 12, span: 82 };
+      const exitCode = await ffmpeg.exec([
+        "-i", inputPath,
+        "-map", `0:a:${source.accompanimentAudioIndex}`,
+        "-vn",
+        "-af", "pan=stereo|c0=0.5*c0-0.5*c1|c1=0.5*c1-0.5*c0,highpass=f=80,lowpass=f=15000,volume=2",
+        "-c:a", "libmp3lame",
+        "-q:a", "2",
+        "vocal-reduced.mp3",
+      ]);
+      if (exitCode !== 0) throw new Error("这个文件的人声削弱处理没有成功。");
+
+      setConversionStatus("正在装入新伴奏…");
+      setConversionProgress(96);
+      const blob = await readWasmFileAsBlob(ffmpeg, "vocal-reduced.mp3", "audio/mpeg");
+      if (vocalReducedObjectUrlRef.current) URL.revokeObjectURL(vocalReducedObjectUrlRef.current);
+      const url = URL.createObjectURL(blob);
+      vocalReducedObjectUrlRef.current = url;
+      setVocalReducedAudioUrl(url);
+      setVocalReductionOn(true);
+      setTrackMode("accompaniment");
+      setConversionProgress(100);
+      setConversionStatus("处理完成，可以试听了");
+      setKtvTrackNote("已启用人声削弱。它适合人声居中的立体声，少量和声或混响可能仍会保留。");
+      setToast("人声削弱伴奏已启用");
+      window.setTimeout(() => setIsConverting(false), 650);
+      try { await ffmpeg.deleteFile("vocal-reduced.mp3"); } catch { /* optional output */ }
+    } catch (error) {
+      setConversionError(error instanceof Error ? error.message : "人声削弱失败，请换一首歌重试。");
+      setConversionStatus("没有完成人声削弱");
+    } finally {
+      if (mounted && ffmpegRef.current) {
+        try { await ffmpegRef.current.unmount("/vocal-input"); } catch { /* already unmounted */ }
+      }
+    }
+  };
+
   const swapKtvTracks = () => {
     if (!audioUrl || !originalAudioUrl) return;
     const currentAccompaniment = audioUrl;
     const currentOriginal = originalAudioUrl;
     const currentAccompanimentObjectUrl = objectUrlRef.current;
+    clearVocalReduction();
+    const source = ktvSourceRef.current;
+    if (source && source.audioChannels.length >= 2) {
+      source.accompanimentAudioIndex = source.accompanimentAudioIndex === 0 ? 1 : 0;
+    }
     objectUrlRef.current = originalObjectUrlRef.current;
     originalObjectUrlRef.current = currentAccompanimentObjectUrl;
     setAudioUrl(currentOriginal);
@@ -757,7 +867,7 @@ export default function Home() {
     <main className="app-shell">
       <audio
         ref={audioRef}
-        src={audioUrl || undefined}
+        src={playbackAudioUrl || undefined}
         onTimeUpdate={(event) => handleTrackTimeUpdate("accompaniment", event.currentTarget)}
         onLoadedMetadata={(event) => {
           if (effectiveTrackMode === "accompaniment") setDuration(event.currentTarget.duration);
@@ -868,6 +978,11 @@ export default function Home() {
           <button type="button" onClick={() => lyricInputRef.current?.click()}>▤ 导入 LRC</button>
           <button type="button" onClick={() => setShowLyricsEditor(true)}>✎ 粘贴歌词</button>
           {videoUrl && originalAudioUrl && audioUrl && <button type="button" onClick={swapKtvTracks}>⇄ 对调音轨</button>}
+          {videoUrl && audioUrl && (
+            <button className={vocalReductionOn ? "vocal-reduction active" : "vocal-reduction"} type="button" onClick={() => void toggleVocalReduction()}>
+              ✦ {vocalReductionOn ? "恢复普通伴奏" : "人声削弱（实验）"}
+            </button>
+          )}
           {hasSong && <button type="button" onClick={() => originalInputRef.current?.click()}>↻ 更换原唱</button>}
           {hasSong && <button type="button" onClick={() => audioInputRef.current?.click()}>↻ 更换伴奏</button>}
           <span className="shortcut-hint">空格播放 · ← → 快退快进</span>
@@ -942,14 +1057,18 @@ export default function Home() {
         <div className="converter-backdrop">
           <section className="converter-card" role="dialog" aria-modal="true" aria-labelledby="converter-title">
             <div className="converter-orbit" aria-hidden="true"><span>♫</span></div>
-            <p className="eyebrow">LOCAL VIDEO CONVERTER</p>
-            <h2 id="converter-title">正在准备你的 KTV 视频</h2>
+            <p className="eyebrow">{conversionMode === "vocal" ? "VOCAL REDUCTION" : "LOCAL VIDEO CONVERTER"}</p>
+            <h2 id="converter-title">{conversionMode === "vocal" ? "正在制作人声削弱伴奏" : "正在准备你的 KTV 视频"}</h2>
             <p className="converter-status">{conversionStatus}</p>
             <div className="converter-progress" aria-label={`转换进度 ${conversionProgress}%`}>
               <i style={{ width: `${conversionProgress}%` }} />
             </div>
             <strong>{conversionProgress}%</strong>
-            <small>整个过程只在你的电脑上进行。大文件可能需要几分钟，请保持页面打开。</small>
+            <small>
+              {conversionMode === "vocal"
+                ? "利用左右声道差异削弱居中的主唱；和声、混响或偏离中央的人声可能仍会保留。"
+                : "整个过程只在你的电脑上进行。大文件可能需要几分钟，请保持页面打开。"}
+            </small>
             {conversionError && <p className="converter-error">{conversionError}</p>}
             <button type="button" onClick={cancelConversion}>{conversionError ? "关闭" : "取消转换"}</button>
           </section>
