@@ -3,6 +3,12 @@
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type LyricLine = { time: number; text: string };
+type DeviceOption = { deviceId: string; label: string };
+type AudioContextWithSink = AudioContext & { setSinkId?: (sinkId: string) => Promise<void> };
+type MediaElementWithSink = HTMLMediaElement & { setSinkId?: (sinkId: string) => Promise<void> };
+type MediaDevicesWithOutputPicker = MediaDevices & {
+  selectAudioOutput?: (options?: { deviceId?: string }) => Promise<MediaDeviceInfo>;
+};
 type AudioGraph = {
   context: AudioContext;
   musicGain: GainNode;
@@ -56,6 +62,7 @@ function parseLyrics(raw: string, duration: number): LyricLine[] {
 
 export default function Home() {
   const audioRef = useRef<HTMLAudioElement>(null);
+  const recordingPreviewRef = useRef<HTMLAudioElement>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
   const lyricInputRef = useRef<HTMLInputElement>(null);
   const lyricsStageRef = useRef<HTMLDivElement>(null);
@@ -85,6 +92,13 @@ export default function Home() {
   const [recordingUrl, setRecordingUrl] = useState("");
   const [meter, setMeter] = useState(0);
   const [toast, setToast] = useState("");
+  const [showDevicePanel, setShowDevicePanel] = useState(false);
+  const [inputDevices, setInputDevices] = useState<DeviceOption[]>([]);
+  const [outputDevices, setOutputDevices] = useState<DeviceOption[]>([]);
+  const [selectedInputId, setSelectedInputId] = useState("default");
+  const [selectedOutputId, setSelectedOutputId] = useState("default");
+  const [outputSelectionSupported, setOutputSelectionSupported] = useState(true);
+  const [devicesLoading, setDevicesLoading] = useState(false);
 
   const activeIndex = useMemo(() => {
     let found = 0;
@@ -103,6 +117,39 @@ export default function Home() {
     const timer = window.setTimeout(() => setToast(""), 2600);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  const refreshDevices = useCallback(async () => {
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+    setDevicesLoading(true);
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      let micNumber = 0;
+      let speakerNumber = 0;
+      setInputDevices(devices.filter((device) => device.kind === "audioinput").map((device) => ({
+        deviceId: device.deviceId,
+        label: device.label || `麦克风 ${++micNumber}`,
+      })));
+      setOutputDevices(devices.filter((device) => device.kind === "audiooutput").map((device) => ({
+        deviceId: device.deviceId,
+        label: device.label || `音频输出 ${++speakerNumber}`,
+      })));
+    } finally {
+      setDevicesLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const savedInput = window.localStorage.getItem("shengchang-input-device");
+    const savedOutput = window.localStorage.getItem("shengchang-output-device");
+    if (savedInput) setSelectedInputId(savedInput);
+    if (savedOutput) setSelectedOutputId(savedOutput);
+    const AudioContextConstructor = window.AudioContext;
+    setOutputSelectionSupported(typeof (AudioContextConstructor?.prototype as AudioContextWithSink | undefined)?.setSinkId === "function");
+    void refreshDevices();
+    const onDeviceChange = () => void refreshDevices();
+    navigator.mediaDevices?.addEventListener?.("devicechange", onDeviceChange);
+    return () => navigator.mediaDevices?.removeEventListener?.("devicechange", onDeviceChange);
+  }, [refreshDevices]);
 
   const ensureGraph = useCallback(() => {
     if (graphRef.current) {
@@ -146,8 +193,12 @@ export default function Home() {
     monitorGain.connect(context.destination);
 
     graphRef.current = { context, musicGain, micGain, monitorGain, wetGain, delay, analyser, recordDestination };
+    const sinkContext = context as AudioContextWithSink;
+    if (selectedOutputId && sinkContext.setSinkId) {
+      void sinkContext.setSinkId(selectedOutputId).catch(() => undefined);
+    }
     return graphRef.current;
-  }, [echo, micVolume, monitoring, musicVolume]);
+  }, [echo, micVolume, monitoring, musicVolume, selectedOutputId]);
 
   useEffect(() => {
     if (graphRef.current) graphRef.current.musicGain.gain.value = musicVolume / 100;
@@ -170,6 +221,7 @@ export default function Home() {
   }, []);
 
   const startMeter = useCallback((analyser: AnalyserNode) => {
+    if (animationRef.current) cancelAnimationFrame(animationRef.current);
     const values = new Uint8Array(analyser.frequencyBinCount);
     const draw = () => {
       analyser.getByteFrequencyData(values);
@@ -180,28 +232,83 @@ export default function Home() {
     draw();
   }, []);
 
-  const enableMic = useCallback(async () => {
+  const activateInput = useCallback(async (deviceId: string, announce = true) => {
     setMicError("");
     try {
       const graph = ensureGraph();
       if (!graph) return false;
-      if (!micStreamRef.current) {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-        });
-        micStreamRef.current = stream;
-        graph.micSource = graph.context.createMediaStreamSource(stream);
-        graph.micSource.connect(graph.micGain);
-        startMeter(graph.analyser);
-      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          deviceId: deviceId && deviceId !== "default" ? { exact: deviceId } : undefined,
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+      });
+      graph.micSource?.disconnect();
+      micStreamRef.current?.getTracks().forEach((track) => track.stop());
+      micStreamRef.current = stream;
+      graph.micSource = graph.context.createMediaStreamSource(stream);
+      graph.micSource.connect(graph.micGain);
+      startMeter(graph.analyser);
+      const activeDeviceId = stream.getAudioTracks()[0]?.getSettings().deviceId || deviceId || "default";
+      setSelectedInputId(activeDeviceId);
+      window.localStorage.setItem("shengchang-input-device", activeDeviceId);
       setMicReady(true);
-      setToast("麦克风已就位");
+      await refreshDevices();
+      if (announce) setToast("麦克风已切换");
       return true;
     } catch {
-      setMicError("无法使用麦克风，请在浏览器设置中允许权限。");
+      setMicError("无法使用这个麦克风，请检查设备和浏览器权限。");
       return false;
     }
-  }, [ensureGraph, startMeter]);
+  }, [ensureGraph, refreshDevices, startMeter]);
+
+  const enableMic = useCallback(async () => {
+    if (micStreamRef.current) return true;
+    const ready = await activateInput(selectedInputId, false);
+    if (ready) setToast("麦克风已就位");
+    return ready;
+  }, [activateInput, selectedInputId]);
+
+  const activateOutput = useCallback(async (requestedDeviceId: string) => {
+    setMicError("");
+    try {
+      const graph = ensureGraph();
+      if (!graph) return;
+      const sinkContext = graph.context as AudioContextWithSink;
+      if (!sinkContext.setSinkId) {
+        setOutputSelectionSupported(false);
+        setMicError("当前浏览器不支持网页内切换输出设备，请使用电脑的声音设置。");
+        return;
+      }
+      let deviceId = requestedDeviceId;
+      try {
+        await sinkContext.setSinkId(deviceId);
+      } catch {
+        const mediaDevices = navigator.mediaDevices as MediaDevicesWithOutputPicker;
+        if (!mediaDevices.selectAudioOutput) throw new Error("output-not-allowed");
+        const selected = await mediaDevices.selectAudioOutput(deviceId && deviceId !== "default" ? { deviceId } : undefined);
+        deviceId = selected.deviceId;
+        await sinkContext.setSinkId(deviceId);
+      }
+      const preview = recordingPreviewRef.current as MediaElementWithSink | null;
+      if (preview?.setSinkId) await preview.setSinkId(deviceId);
+      setSelectedOutputId(deviceId);
+      window.localStorage.setItem("shengchang-output-device", deviceId);
+      await refreshDevices();
+      setToast("输出设备已切换");
+    } catch {
+      setMicError("无法切换到这个输出设备，请允许声音设备权限或使用系统声音设置。");
+    }
+  }, [ensureGraph, refreshDevices]);
+
+  useEffect(() => {
+    const preview = recordingPreviewRef.current as MediaElementWithSink | null;
+    if (recordingUrl && preview?.setSinkId && selectedOutputId) {
+      void preview.setSinkId(selectedOutputId).catch(() => undefined);
+    }
+  }, [recordingUrl, selectedOutputId]);
 
   const handleAudioFile = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -340,6 +447,16 @@ export default function Home() {
         </button>
         <div className="top-actions">
           <span className="privacy"><i />歌曲仅在本机处理</span>
+          <button
+            className={`device-trigger ${micReady ? "ready" : ""}`}
+            type="button"
+            onClick={() => {
+              setShowDevicePanel(true);
+              void refreshDevices();
+            }}
+          >
+            <span>◉</span>声音设备
+          </button>
           <button className="icon-button" type="button" onClick={toggleFullscreen} title="全屏">↗</button>
         </div>
       </header>
@@ -449,9 +566,56 @@ export default function Home() {
       {recordingUrl && (
         <aside className="recording-card">
           <div><span>✓</span><p><strong>你的演唱已录好</strong><small>下载前可以先试听</small></p></div>
-          <audio src={recordingUrl} controls />
+          <audio ref={recordingPreviewRef} src={recordingUrl} controls />
           <a href={recordingUrl} download={`${songName || "我的演唱"}-声场.webm`}>下载录音 ↓</a>
         </aside>
+      )}
+
+      {showDevicePanel && (
+        <div className="device-backdrop" role="presentation" onMouseDown={() => setShowDevicePanel(false)}>
+          <section className="device-panel" role="dialog" aria-modal="true" aria-labelledby="device-title" onMouseDown={(event) => event.stopPropagation()}>
+            <button className="modal-close" type="button" onClick={() => setShowDevicePanel(false)}>×</button>
+            <p className="eyebrow">AUDIO ROUTING</p>
+            <h2 id="device-title">声音设备</h2>
+            <p className="device-intro">选择唱歌用的麦克风和耳机。开启耳返前请戴好耳机，避免啸叫。</p>
+
+            <label className="device-field">
+              <span><i className="input-device-icon">◉</i><b>输入设备</b><small>麦克风</small></span>
+              <select
+                aria-label="选择麦克风输入设备"
+                value={inputDevices.some((device) => device.deviceId === selectedInputId) ? selectedInputId : "default"}
+                onChange={(event) => void activateInput(event.target.value)}
+              >
+                <option value="default">系统默认麦克风</option>
+                {inputDevices.filter((device) => device.deviceId !== "default").map((device) => (
+                  <option key={device.deviceId} value={device.deviceId}>{device.label}</option>
+                ))}
+              </select>
+            </label>
+
+            <label className="device-field">
+              <span><i className="output-device-icon">◖</i><b>输出设备</b><small>耳机 / 音箱</small></span>
+              <select
+                aria-label="选择声音输出设备"
+                value={outputDevices.some((device) => device.deviceId === selectedOutputId) ? selectedOutputId : "default"}
+                disabled={!outputSelectionSupported}
+                onChange={(event) => void activateOutput(event.target.value)}
+              >
+                <option value="default">系统默认输出</option>
+                {outputDevices.filter((device) => device.deviceId !== "default").map((device) => (
+                  <option key={device.deviceId} value={device.deviceId}>{device.label}</option>
+                ))}
+              </select>
+            </label>
+
+            {!outputSelectionSupported && <p className="support-note">你的浏览器暂不支持网页内切换输出；麦克风仍可选择。建议使用 Chrome，或在电脑声音设置中切换耳机。</p>}
+
+            <div className="device-actions">
+              <button type="button" onClick={() => void refreshDevices()}>{devicesLoading ? "正在检查…" : "刷新设备"}</button>
+              <button className="primary-cta" type="button" onClick={() => void enableMic()}>{micReady ? "麦克风已就位" : "允许并检测麦克风"}</button>
+            </div>
+          </section>
+        </div>
       )}
 
       {showLyricsEditor && (

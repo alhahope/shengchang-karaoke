@@ -13,7 +13,7 @@
 * { box-sizing: border-box; }
 html { background: #09090d; color-scheme: dark; }
 body { margin: 0; color: var(--ink); background: #09090d; font-family: "PingFang SC", "Microsoft YaHei", Inter, system-ui, sans-serif; }
-button, input, textarea { font: inherit; }
+button, input, textarea, select { font: inherit; }
 button, a { -webkit-tap-highlight-color: transparent; }
 button { color: inherit; }
 
@@ -27,6 +27,10 @@ button { color: inherit; }
 .top-actions { display: flex; align-items: center; gap: 20px; }
 .privacy { color: #747482; font-size: 12px; display: flex; align-items: center; gap: 7px; }
 .privacy i { width: 6px; height: 6px; border-radius: 100%; background: #45d1a5; box-shadow: 0 0 10px #45d1a5; }
+.device-trigger { height: 36px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--line); background: #111118; border-radius: 10px; padding: 0 12px; color: #a09fac; cursor: pointer; font-size: 11px; }
+.device-trigger:hover { color: white; border-color: rgba(255,255,255,.25); }
+.device-trigger span { color: #666572; }
+.device-trigger.ready span { color: var(--cyan); text-shadow: 0 0 10px var(--cyan); }
 .icon-button { border: 1px solid var(--line); background: #111118; border-radius: 10px; width: 36px; height: 36px; cursor: pointer; font-size: 18px; }
 .icon-button:hover { border-color: rgba(255,255,255,.25); }
 
@@ -109,6 +113,25 @@ input[type="range"] { accent-color: var(--pink); cursor: pointer; }
 .recording-card audio { grid-column: 1 / -1; width: 100%; height: 34px; }
 .recording-card a { grid-row: 1; grid-column: 2; color: white; background: #292833; border-radius: 8px; padding: 8px 10px; font-size: 10px; text-decoration: none; }
 
+.device-backdrop { position: fixed; z-index: 48; inset: 0; background: rgba(3,3,7,.64); backdrop-filter: blur(9px); }
+.device-panel { position: absolute; top: 82px; right: 28px; width: min(430px, calc(100% - 32px)); padding: 27px; border: 1px solid rgba(255,255,255,.13); border-radius: 18px; background: #17161f; box-shadow: 0 35px 90px rgba(0,0,0,.62); }
+.device-panel h2 { margin: 4px 0 7px; font-size: 23px; }
+.device-intro { margin: 0 0 22px; color: #82818e; font-size: 11px; line-height: 1.65; }
+.device-field { display: block; padding: 15px; margin-top: 10px; border: 1px solid var(--line); border-radius: 13px; background: #111017; }
+.device-field > span { display: grid; grid-template-columns: 30px 1fr; align-items: center; margin-bottom: 11px; }
+.device-field i { grid-row: 1 / span 2; width: 24px; height: 24px; display: grid; place-items: center; border-radius: 7px; background: #201f29; font-style: normal; font-size: 12px; }
+.device-field .input-device-icon { color: var(--pink); }
+.device-field .output-device-icon { color: var(--cyan); }
+.device-field b { font-size: 11px; }
+.device-field small { color: #666572; font-size: 8px; margin-top: 1px; }
+.device-field select { width: 100%; height: 38px; padding: 0 34px 0 10px; border: 1px solid rgba(255,255,255,.11); border-radius: 9px; background: #1c1b25; color: #e3e2e9; outline: none; font-size: 11px; cursor: pointer; }
+.device-field select:focus { border-color: rgba(255,75,139,.55); box-shadow: 0 0 0 3px rgba(255,75,139,.08); }
+.device-field select:disabled { color: #686773; cursor: not-allowed; }
+.support-note { margin: 12px 2px 0; padding: 10px 12px; border-radius: 9px; background: rgba(255,190,80,.07); color: #aa9677; font-size: 9px; line-height: 1.6; }
+.device-actions { display: flex; justify-content: flex-end; align-items: center; gap: 9px; margin-top: 18px; }
+.device-actions > button:first-child { border: 1px solid var(--line); background: #20202a; border-radius: 10px; padding: 10px 13px; color: #aaa9b5; cursor: pointer; font-size: 10px; }
+.device-actions .primary-cta { padding: 10px 14px; font-size: 10px; }
+
 .modal-backdrop { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(3,3,7,.76); backdrop-filter: blur(12px); }
 .lyrics-editor { width: min(620px, 100%); border: 1px solid rgba(255,255,255,.13); border-radius: 20px; background: #17161f; box-shadow: 0 40px 100px rgba(0,0,0,.6); padding: 30px; position: relative; }
 .modal-close { position: absolute; right: 18px; top: 16px; border: 0; background: transparent; color: #777682; font-size: 28px; cursor: pointer; }
@@ -140,6 +163,12 @@ input[type="range"] { accent-color: var(--pink); cursor: pointer; }
   .topbar { height: 62px; padding: 0 17px; }
   .brand-mark { width: 35px; height: 35px; }
   .privacy, .shortcut-hint { display: none; }
+  .top-actions { gap: 8px; }
+  .device-trigger { width: 38px; padding: 0; justify-content: center; font-size: 0; }
+  .device-trigger span { font-size: 14px; }
+  .device-panel { top: 72px; right: 16px; padding: 23px 18px; }
+  .device-actions { align-items: stretch; }
+  .device-actions button { flex: 1; }
   .stage { min-height: 470px; }
   .song-heading, .stage-tools { width: calc(100% - 28px); }
   .song-heading h1 { max-width: 58vw; }
