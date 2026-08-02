@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { FFmpeg as FFmpegType } from "@ffmpeg/ffmpeg";
 
 type LyricLine = { time: number; text: string };
 type DeviceOption = { deviceId: string; label: string };
@@ -65,9 +66,11 @@ function parseLyrics(raw: string, duration: number): LyricLine[] {
 export default function Home() {
   const audioRef = useRef<HTMLAudioElement>(null);
   const originalAudioRef = useRef<HTMLAudioElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const recordingPreviewRef = useRef<HTMLAudioElement>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
   const originalInputRef = useRef<HTMLInputElement>(null);
+  const ktvVideoInputRef = useRef<HTMLInputElement>(null);
   const lyricInputRef = useRef<HTMLInputElement>(null);
   const lyricsStageRef = useRef<HTMLDivElement>(null);
   const lyricRefs = useRef<Array<HTMLParagraphElement | null>>([]);
@@ -78,10 +81,14 @@ export default function Home() {
   const animationRef = useRef<number | null>(null);
   const objectUrlRef = useRef<string | null>(null);
   const originalObjectUrlRef = useRef<string | null>(null);
+  const videoObjectUrlRef = useRef<string | null>(null);
+  const ffmpegRef = useRef<FFmpegType | null>(null);
+  const conversionPhaseRef = useRef({ start: 0, span: 1 });
 
   const [songName, setSongName] = useState("还没有选择歌曲");
   const [audioUrl, setAudioUrl] = useState("");
   const [originalAudioUrl, setOriginalAudioUrl] = useState("");
+  const [videoUrl, setVideoUrl] = useState("");
   const [trackMode, setTrackMode] = useState<"original" | "accompaniment">("accompaniment");
   const [lyrics, setLyrics] = useState<LyricLine[]>(starterLyrics);
   const [lyricsDraft, setLyricsDraft] = useState("");
@@ -106,6 +113,11 @@ export default function Home() {
   const [selectedOutputId, setSelectedOutputId] = useState("default");
   const [outputSelectionSupported, setOutputSelectionSupported] = useState(true);
   const [devicesLoading, setDevicesLoading] = useState(false);
+  const [isConverting, setIsConverting] = useState(false);
+  const [conversionProgress, setConversionProgress] = useState(0);
+  const [conversionStatus, setConversionStatus] = useState("");
+  const [conversionError, setConversionError] = useState("");
+  const [ktvTrackNote, setKtvTrackNote] = useState("");
 
   const hasSong = Boolean(audioUrl || originalAudioUrl);
   const effectiveTrackMode = trackMode === "original" && originalAudioUrl
@@ -259,6 +271,8 @@ export default function Home() {
     micStreamRef.current?.getTracks().forEach((track) => track.stop());
     if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
     if (originalObjectUrlRef.current) URL.revokeObjectURL(originalObjectUrlRef.current);
+    if (videoObjectUrlRef.current) URL.revokeObjectURL(videoObjectUrlRef.current);
+    ffmpegRef.current?.terminate();
     void graphRef.current?.context.close();
   }, []);
 
@@ -387,6 +401,204 @@ export default function Home() {
     event.target.value = "";
   };
 
+  const replaceMediaUrl = (kind: "accompaniment" | "original" | "video", blob: Blob) => {
+    const url = URL.createObjectURL(blob);
+    if (kind === "accompaniment") {
+      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+      objectUrlRef.current = url;
+      setAudioUrl(url);
+    } else if (kind === "original") {
+      if (originalObjectUrlRef.current) URL.revokeObjectURL(originalObjectUrlRef.current);
+      originalObjectUrlRef.current = url;
+      setOriginalAudioUrl(url);
+    } else {
+      if (videoObjectUrlRef.current) URL.revokeObjectURL(videoObjectUrlRef.current);
+      videoObjectUrlRef.current = url;
+      setVideoUrl(url);
+    }
+  };
+
+  const readWasmFileAsBlob = async (ffmpeg: FFmpegType, path: string, mimeType: string) => {
+    const data = await ffmpeg.readFile(path);
+    const bytes = data instanceof Uint8Array ? data : new TextEncoder().encode(data);
+    return new Blob([bytes.slice().buffer], { type: mimeType });
+  };
+
+  const loadConverter = async () => {
+    if (ffmpegRef.current?.loaded) return ffmpegRef.current;
+    setConversionStatus("首次使用，正在加载本地转换引擎…");
+    setConversionProgress(3);
+    const [{ FFmpeg }, { toBlobURL }] = await Promise.all([
+      import("@ffmpeg/ffmpeg"),
+      import("@ffmpeg/util"),
+    ]);
+    const ffmpeg = new FFmpeg();
+    ffmpeg.on("progress", ({ progress }) => {
+      const phase = conversionPhaseRef.current;
+      const safeProgress = Number.isFinite(progress) ? Math.max(0, Math.min(1, progress)) : 0;
+      setConversionProgress(Math.round(phase.start + safeProgress * phase.span));
+    });
+    const baseURL = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm";
+    await ffmpeg.load({
+      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, "text/javascript"),
+      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, "application/wasm"),
+    });
+    ffmpegRef.current = ffmpeg;
+    setConversionProgress(15);
+    return ffmpeg;
+  };
+
+  const handleKtvVideoFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (file.size > 1024 * 1024 * 1024) {
+      setMicError("网页版暂时只处理 1 GB 以内的 KTV 文件。");
+      return;
+    }
+
+    setIsConverting(true);
+    setConversionError("");
+    setConversionProgress(1);
+    setConversionStatus("正在准备转换…");
+    audioRef.current?.pause();
+    originalAudioRef.current?.pause();
+    videoRef.current?.pause();
+    setIsPlaying(false);
+
+    let mounted = false;
+    try {
+      const ffmpeg = await loadConverter();
+      const { FFFSType } = await import("@ffmpeg/ffmpeg");
+      const mountPoint = "/ktv-input";
+      try { await ffmpeg.createDir(mountPoint); } catch { /* already exists */ }
+      await ffmpeg.mount(FFFSType.WORKERFS, { files: [file] }, mountPoint);
+      mounted = true;
+      const inputPath = `${mountPoint}/${file.name}`;
+
+      setConversionStatus("正在识别画面、音轨和声道…");
+      setConversionProgress(17);
+      await ffmpeg.ffprobe([
+        "-v", "error",
+        "-show_entries", "stream=index,codec_type,channels:stream_tags=title,language",
+        "-of", "json",
+        inputPath,
+        "-o", "probe.json",
+      ]);
+      const probeData = await ffmpeg.readFile("probe.json", "utf8");
+      const probe = JSON.parse(typeof probeData === "string" ? probeData : new TextDecoder().decode(probeData)) as {
+        streams?: Array<{ codec_type?: string; channels?: number; tags?: { title?: string; language?: string } }>;
+      };
+      const audioStreams = (probe.streams || []).filter((stream) => stream.codec_type === "audio");
+      if (!audioStreams.length) throw new Error("这个文件里没有找到音频轨道。");
+
+      setConversionStatus("正在把 MV 画面转成浏览器格式…");
+      conversionPhaseRef.current = { start: 20, span: 52 };
+      const videoExitCode = await ffmpeg.exec([
+        "-i", inputPath,
+        "-map", "0:v:0",
+        "-an",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-crf", "29",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        "ktv-mv.mp4",
+      ]);
+      if (videoExitCode !== 0) throw new Error("画面转换失败，可能是这个文件使用了特殊视频编码。");
+
+      setConversionStatus("正在提取原唱和伴奏…");
+      let firstTitle = (audioStreams[0]?.tags?.title || "").toLowerCase();
+      let secondTitle = (audioStreams[1]?.tags?.title || "").toLowerCase();
+      const isAccompanimentTitle = (title: string) => /(伴奏|karaoke|instrumental|accomp|music)/i.test(title);
+
+      if (audioStreams.length >= 2) {
+        conversionPhaseRef.current = { start: 74, span: 9 };
+        await ffmpeg.exec(["-i", inputPath, "-map", "0:a:0", "-vn", "-c:a", "libmp3lame", "-q:a", "3", "track-one.mp3"]);
+        conversionPhaseRef.current = { start: 83, span: 9 };
+        await ffmpeg.exec(["-i", inputPath, "-map", "0:a:1", "-vn", "-c:a", "libmp3lame", "-q:a", "3", "track-two.mp3"]);
+      } else if ((audioStreams[0]?.channels || 0) >= 2) {
+        conversionPhaseRef.current = { start: 74, span: 9 };
+        await ffmpeg.exec(["-i", inputPath, "-map", "0:a:0", "-af", "pan=mono|c0=c0", "-c:a", "libmp3lame", "-q:a", "3", "track-one.mp3"]);
+        conversionPhaseRef.current = { start: 83, span: 9 };
+        await ffmpeg.exec(["-i", inputPath, "-map", "0:a:0", "-af", "pan=mono|c0=c1", "-c:a", "libmp3lame", "-q:a", "3", "track-two.mp3"]);
+        firstTitle = "left";
+        secondTitle = "right";
+      } else {
+        conversionPhaseRef.current = { start: 76, span: 16 };
+        await ffmpeg.exec(["-i", inputPath, "-map", "0:a:0", "-vn", "-c:a", "libmp3lame", "-q:a", "3", "track-one.mp3"]);
+      }
+
+      setConversionStatus("正在装入 K 歌舞台…");
+      setConversionProgress(94);
+      const videoBlob = await readWasmFileAsBlob(ffmpeg, "ktv-mv.mp4", "video/mp4");
+      const firstTrackBlob = await readWasmFileAsBlob(ffmpeg, "track-one.mp3", "audio/mpeg");
+      replaceMediaUrl("video", videoBlob);
+
+      if (audioStreams.length >= 2 || (audioStreams[0]?.channels || 0) >= 2) {
+        const secondTrackBlob = await readWasmFileAsBlob(ffmpeg, "track-two.mp3", "audio/mpeg");
+        if (isAccompanimentTitle(firstTitle) && !isAccompanimentTitle(secondTitle)) {
+          replaceMediaUrl("accompaniment", firstTrackBlob);
+          replaceMediaUrl("original", secondTrackBlob);
+        } else {
+          replaceMediaUrl("original", firstTrackBlob);
+          replaceMediaUrl("accompaniment", secondTrackBlob);
+        }
+        setTrackMode("accompaniment");
+        setKtvTrackNote("已识别两路声音。如果原唱、伴奏反了，点击“对调音轨”。");
+      } else {
+        replaceMediaUrl("accompaniment", firstTrackBlob);
+        if (originalObjectUrlRef.current) URL.revokeObjectURL(originalObjectUrlRef.current);
+        originalObjectUrlRef.current = null;
+        setOriginalAudioUrl("");
+        setTrackMode("accompaniment");
+        setKtvTrackNote("只找到一路单声道音频，已作为伴奏载入。");
+      }
+
+      setSongName(file.name.replace(/\.[^.]+$/, ""));
+      setCurrentTime(0);
+      setDuration(0);
+      setRecordingUrl("");
+      setConversionProgress(100);
+      setConversionStatus("转换完成，准备开唱");
+      setToast("KTV 视频已载入");
+      window.setTimeout(() => setIsConverting(false), 700);
+
+      for (const path of ["probe.json", "ktv-mv.mp4", "track-one.mp3", "track-two.mp3"]) {
+        try { await ffmpeg.deleteFile(path); } catch { /* optional output */ }
+      }
+    } catch (error) {
+      setConversionError(error instanceof Error ? error.message : "转换失败，请换一个文件重试。");
+      setConversionStatus("没有完成转换");
+    } finally {
+      if (mounted && ffmpegRef.current) {
+        try { await ffmpegRef.current.unmount("/ktv-input"); } catch { /* already unmounted */ }
+      }
+    }
+  };
+
+  const cancelConversion = () => {
+    ffmpegRef.current?.terminate();
+    ffmpegRef.current = null;
+    setIsConverting(false);
+    setConversionError("");
+    setConversionStatus("");
+    setConversionProgress(0);
+  };
+
+  const swapKtvTracks = () => {
+    if (!audioUrl || !originalAudioUrl) return;
+    const currentAccompaniment = audioUrl;
+    const currentOriginal = originalAudioUrl;
+    const currentAccompanimentObjectUrl = objectUrlRef.current;
+    objectUrlRef.current = originalObjectUrlRef.current;
+    originalObjectUrlRef.current = currentAccompanimentObjectUrl;
+    setAudioUrl(currentOriginal);
+    setOriginalAudioUrl(currentAccompaniment);
+    setTrackMode((mode) => mode === "original" ? "accompaniment" : "original");
+    setToast("原唱和伴奏已对调");
+  };
+
   const handleLyricFile = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -429,18 +641,24 @@ export default function Home() {
       if (secondary && ((effectiveTrackMode === "original" && audioUrl) || (effectiveTrackMode === "accompaniment" && originalAudioUrl))) {
         plays.push(secondary.play());
       }
+      if (videoRef.current && videoUrl) {
+        videoRef.current.currentTime = primary.currentTime;
+        plays.push(videoRef.current.play());
+      }
       await Promise.all(plays);
       setIsPlaying(true);
     } else {
       accompaniment?.pause();
       original?.pause();
+      videoRef.current?.pause();
       setIsPlaying(false);
     }
-  }, [audioUrl, effectiveTrackMode, ensureGraph, hasSong, originalAudioUrl]);
+  }, [audioUrl, effectiveTrackMode, ensureGraph, hasSong, originalAudioUrl, videoUrl]);
 
   const seek = (value: number) => {
     if (audioRef.current && audioUrl) audioRef.current.currentTime = value;
     if (originalAudioRef.current && originalAudioUrl) originalAudioRef.current.currentTime = value;
+    if (videoRef.current && videoUrl) videoRef.current.currentTime = value;
     setCurrentTime(value);
   };
 
@@ -471,12 +689,16 @@ export default function Home() {
     if (other && otherExists && Math.abs(other.currentTime - element.currentTime) > 0.18) {
       other.currentTime = element.currentTime;
     }
+    if (videoRef.current && videoUrl && Math.abs(videoRef.current.currentTime - element.currentTime) > 0.18) {
+      videoRef.current.currentTime = element.currentTime;
+    }
   };
 
   const handleTrackEnded = (mode: "original" | "accompaniment") => {
     if (mode !== effectiveTrackMode) return;
     audioRef.current?.pause();
     originalAudioRef.current?.pause();
+    videoRef.current?.pause();
     setIsPlaying(false);
   };
 
@@ -555,6 +777,13 @@ export default function Home() {
       />
       <input ref={audioInputRef} className="visually-hidden" type="file" accept="audio/*" onChange={handleAudioFile} />
       <input ref={originalInputRef} className="visually-hidden" type="file" accept="audio/*" onChange={handleOriginalFile} />
+      <input
+        ref={ktvVideoInputRef}
+        className="visually-hidden"
+        type="file"
+        accept=".mkv,.mpg,.mpeg,video/x-matroska,video/mpeg"
+        onChange={(event) => void handleKtvVideoFile(event)}
+      />
       <input ref={lyricInputRef} className="visually-hidden" type="file" accept=".lrc,.txt,text/plain" onChange={handleLyricFile} />
 
       <header className="topbar">
@@ -603,12 +832,19 @@ export default function Home() {
         {!hasSong ? (
           <div className="empty-stage">
             <div className="disc"><span>♫</span></div>
-            <p>分别加入原唱和伴奏，像 KTV 一样切换</p>
+            <p>直接打开 KTV 视频，或分别加入原唱和伴奏</p>
             <div className="empty-actions">
+              <button className="ktv-import-cta" type="button" onClick={() => ktvVideoInputRef.current?.click()}><span>▣</span> 打开 MKV / MPG</button>
               <button className="primary-cta" type="button" onClick={() => audioInputRef.current?.click()}><span>+</span> 选择伴奏</button>
               <button className="secondary-cta" type="button" onClick={() => originalInputRef.current?.click()}><span>+</span> 添加原唱</button>
             </div>
-            <small>两个文件最好是同一版本、时长一致</small>
+            <small>KTV 文件会在浏览器本机转换，首次需要加载约 31 MB 引擎</small>
+          </div>
+        ) : videoUrl ? (
+          <div className="mv-stage">
+            <video ref={videoRef} className="mv-video" src={videoUrl} muted playsInline />
+            <div className="mv-vignette" />
+            {ktvTrackNote && <p className="track-note">{ktvTrackNote}</p>}
           </div>
         ) : (
           <div className="lyrics-window" ref={lyricsStageRef}>
@@ -628,8 +864,10 @@ export default function Home() {
         )}
 
         <div className="stage-tools">
+          <button type="button" onClick={() => ktvVideoInputRef.current?.click()}>▣ 导入 KTV 视频</button>
           <button type="button" onClick={() => lyricInputRef.current?.click()}>▤ 导入 LRC</button>
           <button type="button" onClick={() => setShowLyricsEditor(true)}>✎ 粘贴歌词</button>
+          {videoUrl && originalAudioUrl && audioUrl && <button type="button" onClick={swapKtvTracks}>⇄ 对调音轨</button>}
           {hasSong && <button type="button" onClick={() => originalInputRef.current?.click()}>↻ 更换原唱</button>}
           {hasSong && <button type="button" onClick={() => audioInputRef.current?.click()}>↻ 更换伴奏</button>}
           <span className="shortcut-hint">空格播放 · ← → 快退快进</span>
@@ -698,6 +936,24 @@ export default function Home() {
           <audio ref={recordingPreviewRef} src={recordingUrl} controls />
           <a href={recordingUrl} download={`${songName || "我的演唱"}-声场.webm`}>下载录音 ↓</a>
         </aside>
+      )}
+
+      {isConverting && (
+        <div className="converter-backdrop">
+          <section className="converter-card" role="dialog" aria-modal="true" aria-labelledby="converter-title">
+            <div className="converter-orbit" aria-hidden="true"><span>♫</span></div>
+            <p className="eyebrow">LOCAL VIDEO CONVERTER</p>
+            <h2 id="converter-title">正在准备你的 KTV 视频</h2>
+            <p className="converter-status">{conversionStatus}</p>
+            <div className="converter-progress" aria-label={`转换进度 ${conversionProgress}%`}>
+              <i style={{ width: `${conversionProgress}%` }} />
+            </div>
+            <strong>{conversionProgress}%</strong>
+            <small>整个过程只在你的电脑上进行。大文件可能需要几分钟，请保持页面打开。</small>
+            {conversionError && <p className="converter-error">{conversionError}</p>}
+            <button type="button" onClick={cancelConversion}>{conversionError ? "关闭" : "取消转换"}</button>
+          </section>
+        </div>
       )}
 
       {showDevicePanel && (
