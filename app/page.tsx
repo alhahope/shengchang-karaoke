@@ -12,6 +12,8 @@ type MediaDevicesWithOutputPicker = MediaDevices & {
 type AudioGraph = {
   context: AudioContext;
   musicGain: GainNode;
+  accompanimentTrackGain: GainNode;
+  originalTrackGain: GainNode;
   micGain: GainNode;
   monitorGain: GainNode;
   wetGain: GainNode;
@@ -62,8 +64,10 @@ function parseLyrics(raw: string, duration: number): LyricLine[] {
 
 export default function Home() {
   const audioRef = useRef<HTMLAudioElement>(null);
+  const originalAudioRef = useRef<HTMLAudioElement>(null);
   const recordingPreviewRef = useRef<HTMLAudioElement>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
+  const originalInputRef = useRef<HTMLInputElement>(null);
   const lyricInputRef = useRef<HTMLInputElement>(null);
   const lyricsStageRef = useRef<HTMLDivElement>(null);
   const lyricRefs = useRef<Array<HTMLParagraphElement | null>>([]);
@@ -73,9 +77,12 @@ export default function Home() {
   const chunksRef = useRef<Blob[]>([]);
   const animationRef = useRef<number | null>(null);
   const objectUrlRef = useRef<string | null>(null);
+  const originalObjectUrlRef = useRef<string | null>(null);
 
   const [songName, setSongName] = useState("还没有选择歌曲");
   const [audioUrl, setAudioUrl] = useState("");
+  const [originalAudioUrl, setOriginalAudioUrl] = useState("");
+  const [trackMode, setTrackMode] = useState<"original" | "accompaniment">("accompaniment");
   const [lyrics, setLyrics] = useState<LyricLine[]>(starterLyrics);
   const [lyricsDraft, setLyricsDraft] = useState("");
   const [showLyricsEditor, setShowLyricsEditor] = useState(false);
@@ -99,6 +106,13 @@ export default function Home() {
   const [selectedOutputId, setSelectedOutputId] = useState("default");
   const [outputSelectionSupported, setOutputSelectionSupported] = useState(true);
   const [devicesLoading, setDevicesLoading] = useState(false);
+
+  const hasSong = Boolean(audioUrl || originalAudioUrl);
+  const effectiveTrackMode = trackMode === "original" && originalAudioUrl
+    ? "original"
+    : audioUrl
+      ? "accompaniment"
+      : "original";
 
   const activeIndex = useMemo(() => {
     let found = 0;
@@ -157,10 +171,14 @@ export default function Home() {
       return graphRef.current;
     }
     const audio = audioRef.current;
-    if (!audio) return null;
+    const originalAudio = originalAudioRef.current;
+    if (!audio || !originalAudio) return null;
     const context = new AudioContext();
     const musicSource = context.createMediaElementSource(audio);
+    const originalMusicSource = context.createMediaElementSource(originalAudio);
     const musicGain = context.createGain();
+    const accompanimentTrackGain = context.createGain();
+    const originalTrackGain = context.createGain();
     const micGain = context.createGain();
     const monitorGain = context.createGain();
     const wetGain = context.createGain();
@@ -170,6 +188,8 @@ export default function Home() {
     const recordDestination = context.createMediaStreamDestination();
 
     musicGain.gain.value = musicVolume / 100;
+    accompanimentTrackGain.gain.value = effectiveTrackMode === "accompaniment" ? 1 : 0;
+    originalTrackGain.gain.value = effectiveTrackMode === "original" ? 1 : 0;
     micGain.gain.value = micVolume / 100;
     monitorGain.gain.value = monitoring ? 1 : 0;
     wetGain.gain.value = echo / 100;
@@ -177,7 +197,10 @@ export default function Home() {
     feedback.gain.value = 0.22;
     analyser.fftSize = 256;
 
-    musicSource.connect(musicGain);
+    musicSource.connect(accompanimentTrackGain);
+    originalMusicSource.connect(originalTrackGain);
+    accompanimentTrackGain.connect(musicGain);
+    originalTrackGain.connect(musicGain);
     musicGain.connect(context.destination);
     musicGain.connect(recordDestination);
 
@@ -192,13 +215,24 @@ export default function Home() {
     delay.connect(recordDestination);
     monitorGain.connect(context.destination);
 
-    graphRef.current = { context, musicGain, micGain, monitorGain, wetGain, delay, analyser, recordDestination };
+    graphRef.current = {
+      context,
+      musicGain,
+      accompanimentTrackGain,
+      originalTrackGain,
+      micGain,
+      monitorGain,
+      wetGain,
+      delay,
+      analyser,
+      recordDestination,
+    };
     const sinkContext = context as AudioContextWithSink;
     if (selectedOutputId && sinkContext.setSinkId) {
       void sinkContext.setSinkId(selectedOutputId).catch(() => undefined);
     }
     return graphRef.current;
-  }, [echo, micVolume, monitoring, musicVolume, selectedOutputId]);
+  }, [echo, effectiveTrackMode, micVolume, monitoring, musicVolume, selectedOutputId]);
 
   useEffect(() => {
     if (graphRef.current) graphRef.current.musicGain.gain.value = musicVolume / 100;
@@ -212,11 +246,19 @@ export default function Home() {
   useEffect(() => {
     if (graphRef.current) graphRef.current.monitorGain.gain.value = monitoring ? 1 : 0;
   }, [monitoring]);
+  useEffect(() => {
+    const graph = graphRef.current;
+    if (!graph) return;
+    const now = graph.context.currentTime;
+    graph.accompanimentTrackGain.gain.setTargetAtTime(effectiveTrackMode === "accompaniment" ? 1 : 0, now, 0.012);
+    graph.originalTrackGain.gain.setTargetAtTime(effectiveTrackMode === "original" ? 1 : 0, now, 0.012);
+  }, [effectiveTrackMode]);
 
   useEffect(() => () => {
     if (animationRef.current) cancelAnimationFrame(animationRef.current);
     micStreamRef.current?.getTracks().forEach((track) => track.stop());
     if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+    if (originalObjectUrlRef.current) URL.revokeObjectURL(originalObjectUrlRef.current);
     void graphRef.current?.context.close();
   }, []);
 
@@ -318,10 +360,30 @@ export default function Home() {
     objectUrlRef.current = url;
     setAudioUrl(url);
     setSongName(file.name.replace(/\.[^.]+$/, ""));
+    setTrackMode("accompaniment");
+    setCurrentTime(0);
+    setIsPlaying(false);
+    originalAudioRef.current?.pause();
+    setRecordingUrl("");
+    setToast("伴奏已加入，准备开唱");
+    event.target.value = "";
+  };
+
+  const handleOriginalFile = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (originalObjectUrlRef.current) URL.revokeObjectURL(originalObjectUrlRef.current);
+    const url = URL.createObjectURL(file);
+    originalObjectUrlRef.current = url;
+    setOriginalAudioUrl(url);
+    if (!audioUrl) setSongName(file.name.replace(/\.[^.]+$/, ""));
+    setTrackMode("original");
+    audioRef.current?.pause();
+    originalAudioRef.current?.pause();
     setCurrentTime(0);
     setIsPlaying(false);
     setRecordingUrl("");
-    setToast("伴奏已加入，准备开唱");
+    setToast("原唱已加入，可以一键切换");
     event.target.value = "";
   };
 
@@ -350,30 +412,73 @@ export default function Home() {
   };
 
   const togglePlay = useCallback(async () => {
-    const audio = audioRef.current;
-    if (!audioUrl || !audio) {
+    const accompaniment = audioRef.current;
+    const original = originalAudioRef.current;
+    const primary = effectiveTrackMode === "original" ? original : accompaniment;
+    if (!hasSong || !primary) {
       audioInputRef.current?.click();
       return;
     }
     ensureGraph();
-    if (audio.paused) {
-      await audio.play();
+    if (primary.paused) {
+      const secondary = effectiveTrackMode === "original" ? accompaniment : original;
+      if (secondary && ((effectiveTrackMode === "original" && audioUrl) || (effectiveTrackMode === "accompaniment" && originalAudioUrl))) {
+        secondary.currentTime = primary.currentTime;
+      }
+      const plays: Promise<void>[] = [primary.play()];
+      if (secondary && ((effectiveTrackMode === "original" && audioUrl) || (effectiveTrackMode === "accompaniment" && originalAudioUrl))) {
+        plays.push(secondary.play());
+      }
+      await Promise.all(plays);
+      setIsPlaying(true);
     } else {
-      audio.pause();
+      accompaniment?.pause();
+      original?.pause();
+      setIsPlaying(false);
     }
-  }, [audioUrl, ensureGraph]);
+  }, [audioUrl, effectiveTrackMode, ensureGraph, hasSong, originalAudioUrl]);
 
   const seek = (value: number) => {
-    const audio = audioRef.current;
-    if (!audio) return;
-    audio.currentTime = value;
+    if (audioRef.current && audioUrl) audioRef.current.currentTime = value;
+    if (originalAudioRef.current && originalAudioUrl) originalAudioRef.current.currentTime = value;
     setCurrentTime(value);
   };
 
   const skip = useCallback((seconds: number) => {
-    if (!audioRef.current) return;
-    seek(Math.max(0, Math.min(duration || Infinity, audioRef.current.currentTime + seconds)));
-  }, [duration]);
+    seek(Math.max(0, Math.min(duration || Infinity, currentTime + seconds)));
+  }, [currentTime, duration]);
+
+  const selectTrackMode = (mode: "original" | "accompaniment") => {
+    if (mode === "original" && !originalAudioUrl) {
+      originalInputRef.current?.click();
+      return;
+    }
+    if (mode === "accompaniment" && !audioUrl) {
+      audioInputRef.current?.click();
+      return;
+    }
+    setTrackMode(mode);
+    const target = mode === "original" ? originalAudioRef.current : audioRef.current;
+    if (target) setDuration(target.duration || duration);
+    setToast(mode === "original" ? "已切换到原唱" : "已切换到伴奏");
+  };
+
+  const handleTrackTimeUpdate = (mode: "original" | "accompaniment", element: HTMLAudioElement) => {
+    if (mode !== effectiveTrackMode) return;
+    setCurrentTime(element.currentTime);
+    const other = mode === "original" ? audioRef.current : originalAudioRef.current;
+    const otherExists = mode === "original" ? audioUrl : originalAudioUrl;
+    if (other && otherExists && Math.abs(other.currentTime - element.currentTime) > 0.18) {
+      other.currentTime = element.currentTime;
+    }
+  };
+
+  const handleTrackEnded = (mode: "original" | "accompaniment") => {
+    if (mode !== effectiveTrackMode) return;
+    audioRef.current?.pause();
+    originalAudioRef.current?.pause();
+    setIsPlaying(false);
+  };
 
   const toggleRecording = async () => {
     if (isRecording) {
@@ -403,7 +508,7 @@ export default function Home() {
     };
     recorder.start(300);
     setIsRecording(true);
-    if (audioUrl && audioRef.current?.paused) await togglePlay();
+    if (hasSong && !isPlaying) await togglePlay();
   };
 
   useEffect(() => {
@@ -431,13 +536,25 @@ export default function Home() {
       <audio
         ref={audioRef}
         src={audioUrl || undefined}
-        onPlay={() => setIsPlaying(true)}
-        onPause={() => setIsPlaying(false)}
-        onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
-        onLoadedMetadata={(event) => setDuration(event.currentTarget.duration)}
-        onEnded={() => setIsPlaying(false)}
+        onTimeUpdate={(event) => handleTrackTimeUpdate("accompaniment", event.currentTarget)}
+        onLoadedMetadata={(event) => {
+          if (effectiveTrackMode === "accompaniment") setDuration(event.currentTarget.duration);
+          if (currentTime) event.currentTarget.currentTime = currentTime;
+        }}
+        onEnded={() => handleTrackEnded("accompaniment")}
+      />
+      <audio
+        ref={originalAudioRef}
+        src={originalAudioUrl || undefined}
+        onTimeUpdate={(event) => handleTrackTimeUpdate("original", event.currentTarget)}
+        onLoadedMetadata={(event) => {
+          if (effectiveTrackMode === "original") setDuration(event.currentTarget.duration);
+          if (currentTime) event.currentTarget.currentTime = currentTime;
+        }}
+        onEnded={() => handleTrackEnded("original")}
       />
       <input ref={audioInputRef} className="visually-hidden" type="file" accept="audio/*" onChange={handleAudioFile} />
+      <input ref={originalInputRef} className="visually-hidden" type="file" accept="audio/*" onChange={handleOriginalFile} />
       <input ref={lyricInputRef} className="visually-hidden" type="file" accept=".lrc,.txt,text/plain" onChange={handleLyricFile} />
 
       <header className="topbar">
@@ -466,22 +583,32 @@ export default function Home() {
         <div className="aurora aurora-two" />
         <div className="stage-grid" />
         <div className="song-heading">
-          <span className={audioUrl ? "live-dot ready" : "live-dot"} />
+          <span className={hasSong ? "live-dot ready" : "live-dot"} />
           <div>
-            <p>{audioUrl ? "NOW SINGING" : "READY WHEN YOU ARE"}</p>
+            <p>{hasSong ? "NOW SINGING" : "READY WHEN YOU ARE"}</p>
             <h1>{songName}</h1>
           </div>
-          {audioUrl && <button type="button" onClick={() => audioInputRef.current?.click()}>换一首</button>}
+          {hasSong && (
+            <div className="track-switch" aria-label="原唱伴奏切换">
+              <button className={effectiveTrackMode === "original" ? "active" : ""} type="button" onClick={() => selectTrackMode("original")}>
+                {originalAudioUrl ? "原唱" : "+ 原唱"}
+              </button>
+              <button className={effectiveTrackMode === "accompaniment" ? "active" : ""} type="button" onClick={() => selectTrackMode("accompaniment")}>
+                {audioUrl ? "伴奏" : "+ 伴奏"}
+              </button>
+            </div>
+          )}
         </div>
 
-        {!audioUrl ? (
+        {!hasSong ? (
           <div className="empty-stage">
             <div className="disc"><span>♫</span></div>
-            <p>拖入或选择一个 MP3 / WAV 伴奏</p>
-            <button className="primary-cta" type="button" onClick={() => audioInputRef.current?.click()}>
-              <span>+</span> 选择本地伴奏
-            </button>
-            <small>提示：使用纯伴奏版，演唱效果最好</small>
+            <p>分别加入原唱和伴奏，像 KTV 一样切换</p>
+            <div className="empty-actions">
+              <button className="primary-cta" type="button" onClick={() => audioInputRef.current?.click()}><span>+</span> 选择伴奏</button>
+              <button className="secondary-cta" type="button" onClick={() => originalInputRef.current?.click()}><span>+</span> 添加原唱</button>
+            </div>
+            <small>两个文件最好是同一版本、时长一致</small>
           </div>
         ) : (
           <div className="lyrics-window" ref={lyricsStageRef}>
@@ -503,6 +630,8 @@ export default function Home() {
         <div className="stage-tools">
           <button type="button" onClick={() => lyricInputRef.current?.click()}>▤ 导入 LRC</button>
           <button type="button" onClick={() => setShowLyricsEditor(true)}>✎ 粘贴歌词</button>
+          {hasSong && <button type="button" onClick={() => originalInputRef.current?.click()}>↻ 更换原唱</button>}
+          {hasSong && <button type="button" onClick={() => audioInputRef.current?.click()}>↻ 更换伴奏</button>}
           <span className="shortcut-hint">空格播放 · ← → 快退快进</span>
         </div>
       </section>
