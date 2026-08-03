@@ -81,8 +81,6 @@ button { color: inherit; }
 .mv-vignette { position: absolute; inset: 0; pointer-events: none; box-shadow: inset 0 0 80px rgba(0,0,0,.28); }
 .track-note { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); width: max-content; max-width: calc(100% - 30px); margin: 0; padding: 7px 11px; border: 1px solid rgba(255,255,255,.12); border-radius: 9px; background: rgba(8,8,12,.76); color: #b7b6c2; backdrop-filter: blur(10px); font-size: 10px; text-align: center; }
 .stage-tools { position: relative; z-index: 3; width: min(1080px, calc(100% - 60px)); display: flex; align-items: center; gap: 8px; padding-bottom: 16px; }
-.stage-tools .vocal-reduction { border-color: rgba(85,230,210,.24); color: #bcece5; }
-.stage-tools .vocal-reduction.active { border-color: rgba(85,230,210,.55); background: rgba(85,230,210,.12); color: #ecfffc; box-shadow: 0 0 18px rgba(85,230,210,.09); }
 .shortcut-hint { margin-left: auto; color: #555462; font-size: 10px; }
 
 .console { height: 200px; position: relative; z-index: 10; padding: 14px 34px 18px; background: linear-gradient(180deg, #111117, #0d0d12); border-top: 1px solid rgba(255,255,255,.1); box-shadow: 0 -20px 60px rgba(0,0,0,.28); }
