@@ -5,6 +5,19 @@ import type { FFmpeg as FFmpegType } from "@ffmpeg/ffmpeg";
 
 type LyricLine = { time: number; text: string };
 type DeviceOption = { deviceId: string; label: string };
+type SongEntry = {
+  id: string;
+  file: File;
+  title: string;
+  artist: string;
+  format: string;
+  kind: "video" | "audio";
+  language: "华语" | "英文/其他";
+  favorite: boolean;
+  played: boolean;
+  addedAt: number;
+};
+type LibraryFilter = "全部" | "待唱" | "收藏" | "华语" | "英文/其他" | "MKV" | "MPG" | "音频";
 type AudioContextWithSink = AudioContext & { setSinkId?: (sinkId: string) => Promise<void> };
 type MediaElementWithSink = HTMLMediaElement & { setSinkId?: (sinkId: string) => Promise<void> };
 type MediaDevicesWithOutputPicker = MediaDevices & {
@@ -63,6 +76,19 @@ function parseLyrics(raw: string, duration: number): LyricLine[] {
   }));
 }
 
+function songInfoFromFile(file: File) {
+  const baseName = file.name.replace(/\.[^.]+$/, "").replace(/[_＿]+/g, " ").trim();
+  const parts = baseName.split(/\s*[-–—]\s*/).filter(Boolean);
+  const format = (file.name.split(".").pop() || "FILE").toUpperCase();
+  return {
+    title: parts.length > 1 ? parts.slice(1).join(" - ") : baseName,
+    artist: parts.length > 1 ? parts[0] : "本地歌曲",
+    format,
+    kind: /^(MKV|MPG|MPEG)$/i.test(format) ? "video" as const : "audio" as const,
+    language: /[\u3400-\u9fff]/.test(baseName) ? "华语" as const : "英文/其他" as const,
+  };
+}
+
 export default function Home() {
   const audioRef = useRef<HTMLAudioElement>(null);
   const originalAudioRef = useRef<HTMLAudioElement>(null);
@@ -71,6 +97,7 @@ export default function Home() {
   const audioInputRef = useRef<HTMLInputElement>(null);
   const originalInputRef = useRef<HTMLInputElement>(null);
   const ktvVideoInputRef = useRef<HTMLInputElement>(null);
+  const libraryInputRef = useRef<HTMLInputElement>(null);
   const lyricInputRef = useRef<HTMLInputElement>(null);
   const lyricsStageRef = useRef<HTMLDivElement>(null);
   const lyricRefs = useRef<Array<HTMLParagraphElement | null>>([]);
@@ -118,6 +145,11 @@ export default function Home() {
   const [conversionStatus, setConversionStatus] = useState("");
   const [conversionError, setConversionError] = useState("");
   const [ktvTrackNote, setKtvTrackNote] = useState("");
+  const [showSongLibrary, setShowSongLibrary] = useState(false);
+  const [songLibrary, setSongLibrary] = useState<SongEntry[]>([]);
+  const [libraryFilter, setLibraryFilter] = useState<LibraryFilter>("全部");
+  const [librarySearch, setLibrarySearch] = useState("");
+  const [currentSongId, setCurrentSongId] = useState("");
 
   const hasSong = Boolean(audioUrl || originalAudioUrl);
   const effectiveTrackMode = trackMode === "original" && originalAudioUrl
@@ -133,6 +165,22 @@ export default function Home() {
     });
     return found;
   }, [lyrics, currentTime]);
+
+  const filteredSongs = useMemo(() => {
+    const query = librarySearch.trim().toLowerCase();
+    return songLibrary.filter((song) => {
+      const matchesSearch = !query || `${song.title} ${song.artist} ${song.file.name}`.toLowerCase().includes(query);
+      const matchesFilter = libraryFilter === "全部"
+        || (libraryFilter === "待唱" && !song.played)
+        || (libraryFilter === "收藏" && song.favorite)
+        || (libraryFilter === "华语" && song.language === "华语")
+        || (libraryFilter === "英文/其他" && song.language === "英文/其他")
+        || (libraryFilter === "MKV" && song.format === "MKV")
+        || (libraryFilter === "MPG" && ["MPG", "MPEG"].includes(song.format))
+        || (libraryFilter === "音频" && song.kind === "audio");
+      return matchesSearch && matchesFilter;
+    }).sort((a, b) => Number(b.favorite) - Number(a.favorite) || b.addedAt - a.addedAt);
+  }, [libraryFilter, librarySearch, songLibrary]);
 
   useEffect(() => {
     lyricRefs.current[activeIndex]?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -366,20 +414,36 @@ export default function Home() {
     }
   }, [recordingUrl, selectedOutputId]);
 
-  const handleAudioFile = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
+  const loadAudioFile = (file: File, libraryId = "") => {
     if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+    if (videoObjectUrlRef.current) URL.revokeObjectURL(videoObjectUrlRef.current);
     const url = URL.createObjectURL(file);
     objectUrlRef.current = url;
+    videoObjectUrlRef.current = null;
+    if (libraryId && originalObjectUrlRef.current) URL.revokeObjectURL(originalObjectUrlRef.current);
+    if (libraryId) {
+      originalObjectUrlRef.current = null;
+      setOriginalAudioUrl("");
+    }
     setAudioUrl(url);
+    setVideoUrl("");
     setSongName(file.name.replace(/\.[^.]+$/, ""));
     setTrackMode("accompaniment");
     setCurrentTime(0);
     setIsPlaying(false);
     originalAudioRef.current?.pause();
     setRecordingUrl("");
+    if (libraryId) {
+      setCurrentSongId(libraryId);
+      setSongLibrary((songs) => songs.map((song) => song.id === libraryId ? { ...song, played: true } : song));
+    }
     setToast("伴奏已加入，准备开唱");
+  };
+
+  const handleAudioFile = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    loadAudioFile(file);
     event.target.value = "";
   };
 
@@ -448,10 +512,7 @@ export default function Home() {
     return ffmpeg;
   };
 
-  const handleKtvVideoFile = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file) return;
+  const loadKtvVideoFile = async (file: File, libraryId = "") => {
     if (file.size > 1024 * 1024 * 1024) {
       setMicError("网页版暂时只处理 1 GB 以内的 KTV 文件。");
       return;
@@ -556,6 +617,10 @@ export default function Home() {
       }
 
       setSongName(file.name.replace(/\.[^.]+$/, ""));
+      if (libraryId) {
+        setCurrentSongId(libraryId);
+        setSongLibrary((songs) => songs.map((song) => song.id === libraryId ? { ...song, played: true } : song));
+      }
       setCurrentTime(0);
       setDuration(0);
       setRecordingUrl("");
@@ -575,6 +640,61 @@ export default function Home() {
         try { await ffmpegRef.current.unmount("/ktv-input"); } catch { /* already unmounted */ }
       }
     }
+  };
+
+  const handleKtvVideoFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (file) await loadKtvVideoFile(file);
+  };
+
+  const handleLibraryFiles = (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    if (!files.length) return;
+    const accepted = files.filter((file) => {
+      const info = songInfoFromFile(file);
+      return info.kind === "video" || file.type.startsWith("audio/");
+    });
+    const entries = accepted.map((file, index): SongEntry => ({
+      id: `${file.name}-${file.size}-${file.lastModified}`,
+      file,
+      ...songInfoFromFile(file),
+      favorite: false,
+      played: false,
+      addedAt: Date.now() + index,
+    }));
+    setSongLibrary((songs) => {
+      const existing = new Set(songs.map((song) => song.id));
+      return [...songs, ...entries.filter((song) => !existing.has(song.id))];
+    });
+    setShowSongLibrary(true);
+    setToast(`已加入 ${entries.length} 首本地歌曲`);
+  };
+
+  const chooseLibrarySong = async (song: SongEntry) => {
+    setShowSongLibrary(false);
+    if (song.kind === "video") await loadKtvVideoFile(song.file, song.id);
+    else loadAudioFile(song.file, song.id);
+    setSongName(song.title);
+  };
+
+  const toggleFavorite = (songId: string) => {
+    setSongLibrary((songs) => songs.map((song) => song.id === songId ? { ...song, favorite: !song.favorite } : song));
+  };
+
+  const removeLibrarySong = (songId: string) => {
+    setSongLibrary((songs) => songs.filter((song) => song.id !== songId));
+    if (currentSongId === songId) setCurrentSongId("");
+  };
+
+  const playNextLibrarySong = () => {
+    if (!songLibrary.length || isConverting) return;
+    const currentIndex = songLibrary.findIndex((song) => song.id === currentSongId);
+    const following = songLibrary.slice(currentIndex + 1).find((song) => !song.played)
+      || songLibrary.find((song) => !song.played)
+      || songLibrary[(currentIndex + 1 + songLibrary.length) % songLibrary.length];
+    if (following) void chooseLibrarySong(following);
   };
 
   const cancelConversion = () => {
@@ -784,6 +904,14 @@ export default function Home() {
         accept=".mkv,.mpg,.mpeg,video/x-matroska,video/mpeg"
         onChange={(event) => void handleKtvVideoFile(event)}
       />
+      <input
+        ref={libraryInputRef}
+        className="visually-hidden"
+        type="file"
+        multiple
+        accept=".mkv,.mpg,.mpeg,.mp3,.wav,.m4a,.aac,.ogg,.flac,video/x-matroska,video/mpeg,audio/*"
+        onChange={handleLibraryFiles}
+      />
       <input ref={lyricInputRef} className="visually-hidden" type="file" accept=".lrc,.txt,text/plain" onChange={handleLyricFile} />
 
       <header className="topbar">
@@ -793,6 +921,9 @@ export default function Home() {
         </button>
         <div className="top-actions">
           <span className="privacy"><i />歌曲仅在本机处理</span>
+          <button className="song-library-trigger" type="button" onClick={() => setShowSongLibrary(true)}>
+            <span>♫</span>选歌台<b>{songLibrary.length}</b>
+          </button>
           <button
             className={`device-trigger ${micReady ? "ready" : ""}`}
             type="button"
@@ -834,6 +965,7 @@ export default function Home() {
             <div className="disc"><span>♫</span></div>
             <p>直接打开 KTV 视频，或分别加入原唱和伴奏</p>
             <div className="empty-actions">
+              <button className="library-cta" type="button" onClick={() => setShowSongLibrary(true)}><span>♫</span> 打开选歌台</button>
               <button className="ktv-import-cta" type="button" onClick={() => ktvVideoInputRef.current?.click()}><span>▣</span> 打开 MKV / MPG</button>
               <button className="primary-cta" type="button" onClick={() => audioInputRef.current?.click()}><span>+</span> 选择伴奏</button>
               <button className="secondary-cta" type="button" onClick={() => originalInputRef.current?.click()}><span>+</span> 添加原唱</button>
@@ -864,6 +996,8 @@ export default function Home() {
         )}
 
         <div className="stage-tools">
+          <button type="button" onClick={() => setShowSongLibrary(true)}>♫ 选歌台 ({songLibrary.length})</button>
+          {songLibrary.length > 1 && <button type="button" onClick={playNextLibrarySong}>⇥ 下一首</button>}
           <button type="button" onClick={() => ktvVideoInputRef.current?.click()}>▣ 导入 KTV 视频</button>
           <button type="button" onClick={() => lyricInputRef.current?.click()}>▤ 导入 LRC</button>
           <button type="button" onClick={() => setShowLyricsEditor(true)}>✎ 粘贴歌词</button>
@@ -936,6 +1070,74 @@ export default function Home() {
           <audio ref={recordingPreviewRef} src={recordingUrl} controls />
           <a href={recordingUrl} download={`${songName || "我的演唱"}-声场.webm`}>下载录音 ↓</a>
         </aside>
+      )}
+
+      {showSongLibrary && (
+        <div className="library-backdrop" role="presentation" onMouseDown={() => setShowSongLibrary(false)}>
+          <section className="song-library" role="dialog" aria-modal="true" aria-labelledby="library-title" onMouseDown={(event) => event.stopPropagation()}>
+            <header className="library-header">
+              <div>
+                <p className="eyebrow">SONG SELECT</p>
+                <h2 id="library-title">选歌台</h2>
+                <span>{songLibrary.length} 首本地歌曲 · 本次打开有效</span>
+              </div>
+              <button className="modal-close" type="button" onClick={() => setShowSongLibrary(false)}>×</button>
+            </header>
+
+            <div className="library-toolbar">
+              <button className="batch-import" type="button" onClick={() => libraryInputRef.current?.click()}>＋ 批量导入歌曲</button>
+              <label className="library-search">
+                <span>⌕</span>
+                <input value={librarySearch} onChange={(event) => setLibrarySearch(event.target.value)} placeholder="搜索歌名、歌手或文件名" />
+              </label>
+            </div>
+
+            <div className="library-filters" aria-label="歌曲分类">
+              {(["全部", "待唱", "收藏", "华语", "英文/其他", "MKV", "MPG", "音频"] as LibraryFilter[]).map((filter) => (
+                <button className={libraryFilter === filter ? "active" : ""} type="button" key={filter} onClick={() => setLibraryFilter(filter)}>{filter}</button>
+              ))}
+            </div>
+
+            <div className="library-layout">
+              <div className="song-results">
+                {!songLibrary.length ? (
+                  <div className="library-empty">
+                    <div>♫</div>
+                    <h3>先把你的歌库放进来</h3>
+                    <p>可以一次选择很多个 MKV、MPG、MP3 或 WAV 文件。</p>
+                    <button type="button" onClick={() => libraryInputRef.current?.click()}>选择多个歌曲文件</button>
+                  </div>
+                ) : !filteredSongs.length ? (
+                  <div className="library-empty compact"><h3>这个分类暂时没有歌曲</h3><p>换个分类或搜索词试试。</p></div>
+                ) : filteredSongs.map((song) => (
+                  <article className={`song-row ${currentSongId === song.id ? "current" : ""}`} key={song.id}>
+                    <button className={`favorite-button ${song.favorite ? "on" : ""}`} type="button" onClick={() => toggleFavorite(song.id)} aria-label={song.favorite ? "取消收藏" : "收藏歌曲"}>★</button>
+                    <div className="song-format">{song.format}</div>
+                    <div className="song-copy">
+                      <strong>{song.title}</strong>
+                      <span>{song.artist} · {song.language} · {(song.file.size / 1024 / 1024).toFixed(1)} MB</span>
+                    </div>
+                    {currentSongId === song.id ? <i className="current-badge">正在唱</i> : song.played ? <i className="played-badge">已唱</i> : null}
+                    <button className="order-song" type="button" onClick={() => void chooseLibrarySong(song)}>{currentSongId === song.id ? "重唱" : "点歌"}</button>
+                    <button className="remove-song" type="button" onClick={() => removeLibrarySong(song.id)} aria-label={`从选歌台移除 ${song.title}`}>×</button>
+                  </article>
+                ))}
+              </div>
+
+              <aside className="singing-queue">
+                <div className="queue-heading"><span>待唱队列</span><b>{songLibrary.filter((song) => !song.played).length}</b></div>
+                {currentSongId && <p className="queue-current">正在唱：<strong>{songLibrary.find((song) => song.id === currentSongId)?.title || songName}</strong></p>}
+                <ol>
+                  {songLibrary.filter((song) => !song.played).slice(0, 8).map((song) => (
+                    <li key={song.id}><span>{song.title}</span><small>{song.artist}</small></li>
+                  ))}
+                </ol>
+                {songLibrary.length > 1 && <button type="button" onClick={playNextLibrarySong}>播放下一首 ⇥</button>}
+                <small>歌曲文件不会上传；刷新页面后需要重新选择。</small>
+              </aside>
+            </div>
+          </section>
+        </div>
       )}
 
       {isConverting && (
