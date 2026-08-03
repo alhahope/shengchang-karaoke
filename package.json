@@ -1,6 +1,8 @@
 {
   "name": "karaoke-studio",
   "version": "0.1.0",
+  "description": "本地优先的浏览器 K 歌房，支持批量选歌、MKV/MPG、原唱伴奏切换、耳返和录音。",
+  "license": "MIT",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -17,7 +19,7 @@
     "@ffmpeg/ffmpeg": "^0.12.15",
     "@ffmpeg/util": "^0.12.2",
     "drizzle-orm": "0.45.2",
-    "next": "16.2.6",
+    "next": "16.2.11",
     "react": "19.2.6",
     "react-dom": "19.2.6"
   },
@@ -38,6 +40,12 @@
     "vinext": "0.0.50",
     "vite": "8.0.13",
     "wrangler": "4.92.0"
+  },
+  "overrides": {
+    "next": {
+      "postcss": "8.5.18"
+    },
+    "sharp": "0.35.0"
   },
   "type": "module"
 }

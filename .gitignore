@@ -43,3 +43,5 @@ next-env.d.ts
 /work/
 /.npm-cache/
 /.openai/*.tar.gz
+/.openai/hosting.json
+!/.openai/hosting.example.json
