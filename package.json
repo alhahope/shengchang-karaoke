@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "description": "本地优先的浏览器 K 歌房，支持批量选歌、MKV/MPG、原唱伴奏切换、耳返和录音。",
   "license": "MIT",
+  "homepage": "https://github.com/alhahope/shengchang-karaoke#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alhahope/shengchang-karaoke.git"
+  },
+  "bugs": {
+    "url": "https://github.com/alhahope/shengchang-karaoke/issues"
+  },
   "private": true,
   "engines": {
     "node": ">=22.13.0"
