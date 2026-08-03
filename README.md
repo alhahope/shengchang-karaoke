@@ -4,6 +4,8 @@
 
 在线体验：[shengchang-karaoke.re-xgrant9838.chatgpt.site](https://shengchang-karaoke.re-xgrant9838.chatgpt.site/)
 
+GitHub Pages 备用地址：[alhahope.github.io/shengchang-karaoke](https://alhahope.github.io/shengchang-karaoke/)
+
 ## 功能
 
 - 选歌台：批量导入、搜索、收藏、分类筛选、待唱队列和下一首
@@ -69,6 +71,8 @@ cp .openai/hosting.example.json .openai/hosting.json
 ```
 
 然后将 `project_id` 替换为自己的 Sites 项目编号。不要提交个人站点的真实项目编号。
+
+仓库还包含 `.github/workflows/pages.yml`。推送到 `main` 后，GitHub Actions 会构建纯静态版本并发布到 GitHub Pages。
 
 ## 数据与版权
 
